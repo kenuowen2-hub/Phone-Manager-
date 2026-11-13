@@ -2,8 +2,10 @@ package com.example.ui.screens.filter
 
 import android.annotation.SuppressLint
 import android.webkit.WebChromeClient
+import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -32,16 +34,15 @@ import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -67,6 +68,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.example.data.local.BlockedRule
+import com.example.filter.FilterCheckResult
 import com.example.ui.MainViewModel
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -148,12 +150,14 @@ fun SearchFilterScreen(viewModel: MainViewModel) {
                     searchInput = searchInput,
                     onSearchInputChange = { searchInput = it },
                     onExecuteSearch = { viewModel.executeSearchQuery(it) },
+                    onCheckUrl = { url -> viewModel.checkAndHandleWebUrl(url) },
                     activeUrl = activeUrl,
                     filterResult = filterResult,
                     onDismissAlert = { viewModel.dismissFilterResult() }
                 )
                 1 -> RuleManagerTab(
                     rules = blockedRules,
+                    onTestQuery = { query -> viewModel.testFilterQuery(query) },
                     onEditRule = { ruleToEdit = it },
                     onDeleteRule = { viewModel.deleteBlockedRule(it) }
                 )
@@ -202,10 +206,19 @@ fun SafeBrowserTab(
     searchInput: String,
     onSearchInputChange: (String) -> Unit,
     onExecuteSearch: (String) -> Unit,
+    onCheckUrl: (String) -> Boolean,
     activeUrl: String,
-    filterResult: com.example.filter.FilterCheckResult?,
+    filterResult: FilterCheckResult?,
     onDismissAlert: () -> Unit
 ) {
+    var pageLoadingProgress by remember { mutableIntStateOf(100) }
+    var webViewRef by remember { mutableStateOf<WebView?>(null) }
+    var canGoBack by remember { mutableStateOf(false) }
+
+    BackHandler(enabled = canGoBack) {
+        webViewRef?.goBack()
+    }
+
     Column(modifier = Modifier.fillMaxSize()) {
         // Search Input Bar
         Row(
@@ -316,6 +329,15 @@ fun SafeBrowserTab(
             }
         }
 
+        if (pageLoadingProgress in 1..99) {
+            LinearProgressIndicator(
+                progress = { pageLoadingProgress / 100f },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 4.dp)
+            )
+        }
+
         // WebView Embedded Browser
         var lastLoadedUrl by remember { mutableStateOf("") }
         Box(
@@ -326,15 +348,35 @@ fun SafeBrowserTab(
             AndroidView(
                 factory = { ctx ->
                     WebView(ctx).apply {
+                        webViewRef = this
                         settings.javaScriptEnabled = true
                         settings.domStorageEnabled = true
-                        webViewClient = WebViewClient()
-                        webChromeClient = WebChromeClient()
+                        webViewClient = object : WebViewClient() {
+                            override fun shouldOverrideUrlLoading(
+                                view: WebView?,
+                                request: WebResourceRequest?
+                            ): Boolean {
+                                val targetUrl = request?.url?.toString() ?: return false
+                                return onCheckUrl(targetUrl)
+                            }
+
+                            override fun onPageFinished(view: WebView?, url: String?) {
+                                super.onPageFinished(view, url)
+                                canGoBack = view?.canGoBack() == true
+                            }
+                        }
+                        webChromeClient = object : WebChromeClient() {
+                            override fun onProgressChanged(view: WebView?, newProgress: Int) {
+                                super.onProgressChanged(view, newProgress)
+                                pageLoadingProgress = newProgress
+                            }
+                        }
                         loadUrl(activeUrl)
                         lastLoadedUrl = activeUrl
                     }
                 },
                 update = { webView ->
+                    webViewRef = webView
                     if (activeUrl.isNotBlank() && activeUrl != lastLoadedUrl) {
                         lastLoadedUrl = activeUrl
                         webView.loadUrl(activeUrl)
@@ -351,31 +393,137 @@ fun SafeBrowserTab(
 @Composable
 fun RuleManagerTab(
     rules: List<BlockedRule>,
+    onTestQuery: (String) -> FilterCheckResult,
     onEditRule: (BlockedRule) -> Unit,
     onDeleteRule: (BlockedRule) -> Unit
 ) {
-    if (rules.isEmpty()) {
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(32.dp),
-            contentAlignment = Alignment.Center
-        ) {
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Icon(Icons.Default.FilterAlt, contentDescription = null, modifier = Modifier.size(48.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                Spacer(modifier = Modifier.height(12.dp))
-                Text("No blocked rules defined.", style = MaterialTheme.typography.titleMedium)
-                Text("Tap the + button below to add words or phrases.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    var testQuery by remember { mutableStateOf("") }
+    val testResult = remember(testQuery, rules) {
+        if (testQuery.isBlank()) null else onTestQuery(testQuery)
+    }
+
+    LazyColumn(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        item(key = "rule_tester_card") {
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("test_rule_card"),
+                shape = RoundedCornerShape(14.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+            ) {
+                Column(modifier = Modifier.padding(14.dp)) {
+                    Text(
+                        "Test Your Filter Rules",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        "Try a sample search below to verify whether your rules allow or block it locally.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(10.dp))
+                    OutlinedTextField(
+                        value = testQuery,
+                        onValueChange = { testQuery = it },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("test_rule_input"),
+                        placeholder = { Text("Type a sample word or phrase to test...") },
+                        trailingIcon = {
+                            if (testQuery.isNotEmpty()) {
+                                IconButton(onClick = { testQuery = "" }) {
+                                    Icon(Icons.Default.Clear, contentDescription = "Clear test input")
+                                }
+                            }
+                        },
+                        singleLine = true,
+                        shape = RoundedCornerShape(10.dp)
+                    )
+
+                    if (testResult != null) {
+                        Spacer(modifier = Modifier.height(10.dp))
+                        val isBlocked = testResult.isBlocked
+                        Card(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("test_rule_result_card"),
+                            shape = RoundedCornerShape(10.dp),
+                            colors = CardDefaults.cardColors(
+                                containerColor = if (isBlocked) {
+                                    MaterialTheme.colorScheme.errorContainer
+                                } else {
+                                    MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f)
+                                }
+                            )
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(10.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    imageVector = if (isBlocked) Icons.Default.Block else Icons.Default.CheckCircle,
+                                    contentDescription = null,
+                                    tint = if (isBlocked) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = if (isBlocked) {
+                                        val matched = testResult.matchedRule
+                                        val matchType = if (matched?.isWholeWord == true) "Whole Word" else "Phrase"
+                                        "Blocked by rule \"${matched?.pattern}\" ($matchType)"
+                                    } else {
+                                        "Allowed — no blocked rules matched."
+                                    },
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = if (isBlocked) {
+                                        MaterialTheme.colorScheme.onErrorContainer
+                                    } else {
+                                        MaterialTheme.colorScheme.onSurface
+                                    }
+                                )
+                            }
+                        }
+                    }
+                }
             }
         }
-    } else {
-        LazyColumn(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            item {
+
+        if (rules.isEmpty()) {
+            item(key = "empty_rules_state") {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 36.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Icon(
+                            Icons.Default.FilterAlt,
+                            contentDescription = null,
+                            modifier = Modifier.size(48.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Text("No blocked rules defined.", style = MaterialTheme.typography.titleMedium)
+                        Text(
+                            "Tap the + button below to add words or phrases.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+        } else {
+            item(key = "active_rules_header") {
                 Text(
                     "Active Filtering Rules (${rules.size})",
                     style = MaterialTheme.typography.titleSmall,

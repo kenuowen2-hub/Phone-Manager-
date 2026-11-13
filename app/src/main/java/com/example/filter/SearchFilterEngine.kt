@@ -1,6 +1,8 @@
 package com.example.filter
 
 import com.example.data.local.BlockedRule
+import java.net.URI
+import java.net.URLDecoder
 import java.util.regex.Pattern
 
 data class FilterCheckResult(
@@ -10,6 +12,8 @@ data class FilterCheckResult(
 )
 
 object SearchFilterEngine {
+
+    private val searchParamNames = setOf("q", "query", "p", "search_query", "text", "wd", "k")
 
     fun checkQuery(query: String, rules: List<BlockedRule>): FilterCheckResult {
         val trimmed = query.trim()
@@ -45,5 +49,24 @@ object SearchFilterEngine {
         }
 
         return FilterCheckResult(isBlocked = false)
+    }
+
+    fun extractSearchQueryFromUrl(url: String): String? {
+        return try {
+            val rawQuery = URI(url).rawQuery ?: return null
+            for (pair in rawQuery.split("&")) {
+                val idx = pair.indexOf('=')
+                if (idx > 0) {
+                    val key = URLDecoder.decode(pair.substring(0, idx), "UTF-8").lowercase()
+                    if (key in searchParamNames) {
+                        val value = URLDecoder.decode(pair.substring(idx + 1), "UTF-8").trim()
+                        if (value.isNotEmpty()) return value
+                    }
+                }
+            }
+            null
+        } catch (_: Exception) {
+            null
+        }
     }
 }

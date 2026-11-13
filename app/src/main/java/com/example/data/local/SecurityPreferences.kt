@@ -3,6 +3,8 @@ package com.example.data.local
 import android.content.Context
 import android.content.SharedPreferences
 import com.example.security.PinSecurityHelper
+import com.example.ui.theme.ThemeConfig
+import com.example.ui.theme.ThemeMode
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -23,7 +25,8 @@ data class SecuritySettingsState(
     val nightEndHour: Int = 7,
     val failedAttempts: Int = 0,
     val lockoutUntilMillis: Long = 0L,
-    val themeMode: String = "system" // "system", "light", "dark"
+    val themeMode: String = "system", // "system", "light", "dark"
+    val themeConfig: ThemeConfig = ThemeConfig.DEFAULT
 )
 
 class SecurityPreferences(context: Context) {
@@ -53,6 +56,17 @@ class SecurityPreferences(context: Context) {
             LockSchedule.ALWAYS
         }
 
+        val themeModeKey = prefs.getString(KEY_THEME_MODE, ThemeMode.SYSTEM.storageKey) ?: ThemeMode.SYSTEM.storageKey
+        val themePresetId = prefs.getString(KEY_THEME_PRESET, ThemeConfig.PRESET_OCEAN) ?: ThemeConfig.PRESET_OCEAN
+        val customPrimary = prefs.getInt(KEY_CUSTOM_PRIMARY_ARGB, ThemeConfig.DEFAULT_CUSTOM_PRIMARY_ARGB)
+        val customAccent = prefs.getInt(KEY_CUSTOM_ACCENT_ARGB, ThemeConfig.DEFAULT_CUSTOM_ACCENT_ARGB)
+        val themeConfig = ThemeConfig(
+            mode = ThemeMode.fromKey(themeModeKey),
+            presetId = themePresetId,
+            customPrimaryArgb = customPrimary,
+            customAccentArgb = customAccent
+        )
+
         return SecuritySettingsState(
             hasPinConfigured = hash.isNotBlank(),
             isAppLockEnabled = prefs.getBoolean(KEY_LOCK_ENABLED, false),
@@ -62,7 +76,8 @@ class SecurityPreferences(context: Context) {
             nightEndHour = prefs.getInt(KEY_NIGHT_END, 7),
             failedAttempts = prefs.getInt(KEY_FAILED_ATTEMPTS, 0),
             lockoutUntilMillis = prefs.getLong(KEY_LOCKOUT_UNTIL, 0L),
-            themeMode = prefs.getString(KEY_THEME_MODE, "system") ?: "system"
+            themeMode = themeModeKey,
+            themeConfig = themeConfig
         )
     }
 
@@ -142,8 +157,24 @@ class SecurityPreferences(context: Context) {
     }
 
     fun setThemeMode(mode: String) {
-        prefs.edit().putString(KEY_THEME_MODE, mode).apply()
+        prefs.edit().putString(KEY_THEME_MODE, ThemeMode.fromKey(mode).storageKey).apply()
         _settings.value = loadSettings()
+    }
+
+    fun saveThemeConfig(config: ThemeConfig) {
+        prefs.edit()
+            .putString(KEY_THEME_MODE, config.mode.storageKey)
+            .putString(KEY_THEME_PRESET, config.presetId)
+            .putInt(KEY_CUSTOM_PRIMARY_ARGB, config.customPrimaryArgb)
+            .putInt(KEY_CUSTOM_ACCENT_ARGB, config.customAccentArgb)
+            .apply()
+        _settings.value = loadSettings()
+    }
+
+    fun resetThemeConfig(): ThemeConfig {
+        val defaultConfig = ThemeConfig.DEFAULT
+        saveThemeConfig(defaultConfig)
+        return defaultConfig
     }
 
     fun shouldCurrentlyLock(): Boolean {
@@ -180,5 +211,8 @@ class SecurityPreferences(context: Context) {
         private const val KEY_FAILED_ATTEMPTS = "failed_attempts"
         private const val KEY_LOCKOUT_UNTIL = "lockout_until"
         private const val KEY_THEME_MODE = "theme_mode"
+        private const val KEY_THEME_PRESET = "theme_preset"
+        private const val KEY_CUSTOM_PRIMARY_ARGB = "theme_custom_primary_argb"
+        private const val KEY_CUSTOM_ACCENT_ARGB = "theme_custom_accent_argb"
     }
 }

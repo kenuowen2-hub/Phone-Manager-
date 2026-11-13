@@ -1,69 +1,46 @@
 package com.example.ui.theme
 
-import android.os.Build
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.darkColorScheme
-import androidx.compose.material3.dynamicDarkColorScheme
-import androidx.compose.material3.dynamicLightColorScheme
-import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalContext
-
-private val DarkColorScheme = darkColorScheme(
-    primary = CyanAccentLight,
-    onPrimary = PrimaryNavy,
-    primaryContainer = Color(0xFF0E7490),
-    onPrimaryContainer = Color(0xFFCFFAFE),
-    secondary = EmeraldGreenLight,
-    onSecondary = PrimaryNavy,
-    secondaryContainer = Color(0xFF047857),
-    onSecondaryContainer = Color(0xFFD1FAE5),
-    tertiary = AmberWarning,
-    background = PrimaryNavy,
-    onBackground = Color(0xFFF1F5F9),
-    surface = SurfaceDark,
-    onSurface = Color(0xFFF8FAFC),
-    surfaceVariant = SurfaceCardDark,
-    onSurfaceVariant = Color(0xFFCBD5E1),
-    error = RoseError,
-    onError = Color.White
-)
-
-private val LightColorScheme = lightColorScheme(
-    primary = LightPrimary,
-    onPrimary = Color.White,
-    primaryContainer = Color(0xFFE0F2FE),
-    onPrimaryContainer = Color(0xFF0369A1),
-    secondary = LightSecondary,
-    onSecondary = Color.White,
-    secondaryContainer = Color(0xFFCCFBF1),
-    onSecondaryContainer = Color(0xFF0F766E),
-    tertiary = AmberWarning,
-    background = LightBackground,
-    onBackground = Color(0xFF0F172A),
-    surface = LightSurface,
-    onSurface = Color(0xFF1E293B),
-    surfaceVariant = LightSurfaceCard,
-    onSurfaceVariant = Color(0xFF475569),
-    error = RoseError,
-    onError = Color.White
-)
+import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.remember
+import androidx.compose.ui.platform.LocalView
+import androidx.core.view.WindowCompat
 
 @Composable
 fun SmartPhoneManagerTheme(
-    darkTheme: Boolean = isSystemInDarkTheme(),
-    dynamicColor: Boolean = true,
+    themeConfig: ThemeConfig = ThemeConfig.DEFAULT,
+    applySystemBars: Boolean = true,
     content: @Composable () -> Unit,
 ) {
-    val colorScheme = when {
-        dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
-            val context = LocalContext.current
-            if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
+    val systemDark = isSystemInDarkTheme()
+    val isDark = when (themeConfig.mode) {
+        ThemeMode.LIGHT -> false
+        ThemeMode.DARK -> true
+        ThemeMode.SYSTEM -> systemDark
+    }
+
+    val colorScheme = remember(themeConfig, isDark) {
+        ThemeColorEngine.buildColorScheme(themeConfig, isDark)
+    }
+
+    if (applySystemBars) {
+        val view = LocalView.current
+        if (!view.isInEditMode) {
+            SideEffect {
+                val activity = view.context.findActivity()
+                val window = activity?.window
+                if (window != null) {
+                    val controller = WindowCompat.getInsetsController(window, view)
+                    controller.isAppearanceLightStatusBars = !isDark
+                    controller.isAppearanceLightNavigationBars = !isDark
+                }
+            }
         }
-        darkTheme -> DarkColorScheme
-        else -> LightColorScheme
     }
 
     MaterialTheme(
@@ -71,4 +48,10 @@ fun SmartPhoneManagerTheme(
         typography = Typography,
         content = content
     )
+}
+
+private tailrec fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
 }

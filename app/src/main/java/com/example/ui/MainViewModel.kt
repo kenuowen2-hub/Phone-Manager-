@@ -21,8 +21,11 @@ import com.example.device.DeviceStatsManager
 import com.example.device.InstalledAppsManager
 import com.example.filter.FilterCheckResult
 import com.example.filter.SearchFilterEngine
+import com.example.security.BiometricHelper
+import com.example.security.BiometricStatus
 import com.example.storage.SharedFileItem
 import com.example.storage.StorageManagerHelper
+import com.example.ui.theme.ThemeConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -116,6 +119,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _isLockGateOpen = MutableStateFlow(false)
     val isLockGateOpen: StateFlow<Boolean> = _isLockGateOpen.asStateFlow()
 
+    private val _biometricStatus = MutableStateFlow(BiometricHelper.checkStatus(application))
+    val biometricStatus: StateFlow<BiometricStatus> = _biometricStatus.asStateFlow()
+
     init {
         refreshDashboard()
         refreshInstalledApps()
@@ -154,6 +160,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun refreshDashboard() {
         deviceStatsManager.refreshAll()
+        refreshBiometricStatus()
+    }
+
+    fun refreshBiometricStatus() {
+        _biometricStatus.value = BiometricHelper.checkStatus(getApplication())
     }
 
     private var appsJob: kotlinx.coroutines.Job? = null
@@ -223,6 +234,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setThemeMode(mode: String) {
         securityPrefs.setThemeMode(mode)
+    }
+
+    fun saveThemeConfig(config: ThemeConfig) {
+        securityPrefs.saveThemeConfig(config)
+    }
+
+    fun resetThemeConfig(): ThemeConfig {
+        return securityPrefs.resetThemeConfig()
     }
 
     // Lock gate simulation
@@ -311,6 +330,31 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun testFilterQuery(query: String): FilterCheckResult {
+        return SearchFilterEngine.checkQuery(query, blockedRules.value)
+    }
+
+    fun checkAndHandleWebUrl(url: String): Boolean {
+        val extracted = SearchFilterEngine.extractSearchQueryFromUrl(url) ?: return false
+        val result = SearchFilterEngine.checkQuery(extracted, blockedRules.value)
+        if (result.isBlocked) {
+            _lastFilterResult.value = result
+            viewModelScope.launch {
+                result.matchedRule?.let { rule ->
+                    db.blockedRuleDao().incrementMatchCount(rule.id)
+                    db.searchBlockedLogDao().insertLog(
+                        SearchBlockedLog(
+                            query = extracted,
+                            matchedRule = rule.pattern
+                        )
+                    )
+                }
+            }
+            return true
+        }
+        return false
+    }
+
     fun dismissFilterResult() {
         _lastFilterResult.value = null
     }
@@ -389,6 +433,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val started = audioRecorder.startRecording()
         if (started) {
             _audioTranscribeState.value = AudioTranscribeState.Recording
+        } else {
+            _audioTranscribeState.value = AudioTranscribeState.Error(
+                "Microphone is unavailable or failed to initialize."
+            )
         }
         return started
     }
@@ -436,5 +484,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             db.transcriptionDao().deleteTranscription(item)
         }
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        deviceStatsManager.stop()
     }
 }

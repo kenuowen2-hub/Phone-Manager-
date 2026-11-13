@@ -1,51 +1,20 @@
 package com.example.device
 
-import android.app.ActivityManager
 import android.app.AppOpsManager
 import android.app.usage.UsageStats
 import android.app.usage.UsageStatsManager
-import android.content.BroadcastReceiver
 import android.content.Context
-import android.content.Intent
-import android.content.IntentFilter
-import android.os.BatteryManager
 import android.os.Build
-import android.os.Environment
 import android.os.Process
-import android.os.StatFs
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import java.io.File
+import kotlinx.coroutines.launch
 import java.util.Calendar
-
-data class BatteryInfo(
-    val levelPercent: Int = 0,
-    val isCharging: Boolean = false,
-    val chargingSource: String = "Not charging",
-    val health: String = "Good",
-    val temperatureCelsius: Float = 0f,
-    val technology: String = "Li-ion",
-    val voltageMv: Int = 0
-)
-
-data class StorageInfo(
-    val totalBytes: Long = 0L,
-    val freeBytes: Long = 0L,
-    val usedBytes: Long = 0L,
-    val usedPercent: Int = 0,
-    val totalGbFormatted: String = "0 GB",
-    val freeGbFormatted: String = "0 GB",
-    val usedGbFormatted: String = "0 GB"
-)
-
-data class MemoryInfoData(
-    val totalRamBytes: Long = 0L,
-    val availableRamBytes: Long = 0L,
-    val usedRamBytes: Long = 0L,
-    val usedPercent: Int = 0,
-    val isLowMemory: Boolean = false
-)
 
 data class RecentAppUsageItem(
     val packageName: String,
@@ -68,49 +37,43 @@ data class DeviceDashboardState(
 
 class DeviceStatsManager(private val context: Context) {
 
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+
+    val batteryMonitor = BatteryMonitor(context)
+    val storageMonitor = StorageMonitor(context)
+    val ramMonitor = RamMonitor(context)
+
     private val _dashboardState = MutableStateFlow(DeviceDashboardState())
     val dashboardState: StateFlow<DeviceDashboardState> = _dashboardState.asStateFlow()
 
-    private val batteryReceiver = object : BroadcastReceiver() {
-        override fun onReceive(c: Context?, intent: Intent?) {
-            updateBatteryInfo(intent)
-        }
-    }
-
     init {
-        val filter = IntentFilter(Intent.ACTION_BATTERY_CHANGED)
-        val initialBatteryIntent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            try {
-                context.applicationContext.registerReceiver(batteryReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
-            } catch (_: Exception) {
-                try {
-                    context.applicationContext.registerReceiver(null, filter)
-                } catch (_: Exception) {
-                    null
-                }
-            }
-        } else {
-            try {
-                context.applicationContext.registerReceiver(batteryReceiver, filter)
-            } catch (_: Exception) {
-                try {
-                    context.applicationContext.registerReceiver(null, filter)
-                } catch (_: Exception) {
-                    null
-                }
+        scope.launch {
+            batteryMonitor.batteryInfo.collect { battery ->
+                _dashboardState.value = _dashboardState.value.copy(battery = battery)
             }
         }
-        updateBatteryInfo(initialBatteryIntent)
+        scope.launch {
+            storageMonitor.storageInfo.collect { storage ->
+                _dashboardState.value = _dashboardState.value.copy(storage = storage)
+            }
+        }
+        scope.launch {
+            ramMonitor.memoryInfo.collect { memory ->
+                _dashboardState.value = _dashboardState.value.copy(memory = memory)
+            }
+        }
         refreshAll()
     }
 
     fun refreshAll() {
-        val storage = calculateStorage()
-        val mem = calculateMemory()
+        batteryMonitor.refresh()
+        val storage = storageMonitor.refresh()
+        val mem = ramMonitor.refresh()
         val hasUsage = checkUsageStatsPermission()
         val recentApps = if (hasUsage) fetchRecentAppUsage() else emptyList()
 
         _dashboardState.value = _dashboardState.value.copy(
+            battery = batteryMonitor.batteryInfo.value,
             storage = storage,
             memory = mem,
             hasUsageStatsPermission = hasUsage,
@@ -118,101 +81,9 @@ class DeviceStatsManager(private val context: Context) {
         )
     }
 
-    private fun updateBatteryInfo(intent: Intent?) {
-        if (intent == null) return
-        val level = intent.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
-        val scale = intent.getIntExtra(BatteryManager.EXTRA_SCALE, -1)
-        val percent = if (level >= 0 && scale > 0) ((level.toFloat() / scale) * 100).toInt() else 0
-
-        val status = intent.getIntExtra(BatteryManager.EXTRA_STATUS, -1)
-        val isCharging = status == BatteryManager.BATTERY_STATUS_CHARGING ||
-                status == BatteryManager.BATTERY_STATUS_FULL
-
-        val chargePlug = intent.getIntExtra(BatteryManager.EXTRA_PLUGGED, -1)
-        val source = when (chargePlug) {
-            BatteryManager.BATTERY_PLUGGED_AC -> "AC Charger"
-            BatteryManager.BATTERY_PLUGGED_USB -> "USB Cable"
-            BatteryManager.BATTERY_PLUGGED_WIRELESS -> "Wireless"
-            else -> if (isCharging) "Charging" else "On Battery"
-        }
-
-        val healthCode = intent.getIntExtra(BatteryManager.EXTRA_HEALTH, BatteryManager.BATTERY_HEALTH_GOOD)
-        val health = when (healthCode) {
-            BatteryManager.BATTERY_HEALTH_GOOD -> "Good"
-            BatteryManager.BATTERY_HEALTH_OVERHEAT -> "Overheated"
-            BatteryManager.BATTERY_HEALTH_DEAD -> "Dead"
-            BatteryManager.BATTERY_HEALTH_OVER_VOLTAGE -> "Over Voltage"
-            BatteryManager.BATTERY_HEALTH_UNSPECIFIED_FAILURE -> "Failure Reported"
-            BatteryManager.BATTERY_HEALTH_COLD -> "Cold"
-            else -> "Normal"
-        }
-
-        val tempTenths = intent.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, 0)
-        val tempCelsius = tempTenths / 10f
-        val tech = intent.getStringExtra(BatteryManager.EXTRA_TECHNOLOGY) ?: "Li-ion"
-        val voltage = intent.getIntExtra(BatteryManager.EXTRA_VOLTAGE, 0)
-
-        _dashboardState.value = _dashboardState.value.copy(
-            battery = BatteryInfo(
-                levelPercent = percent,
-                isCharging = isCharging,
-                chargingSource = source,
-                health = health,
-                temperatureCelsius = tempCelsius,
-                technology = tech,
-                voltageMv = voltage
-            )
-        )
-    }
-
-    private fun calculateStorage(): StorageInfo {
-        return try {
-            val path: File = Environment.getDataDirectory()
-            val stat = StatFs(path.path)
-            val blockSize = stat.blockSizeLong
-            val totalBlocks = stat.blockCountLong
-            val availableBlocks = stat.availableBlocksLong
-
-            val totalBytes = totalBlocks * blockSize
-            val freeBytes = availableBlocks * blockSize
-            val usedBytes = totalBytes - freeBytes
-            val percent = if (totalBytes > 0) ((usedBytes.toDouble() / totalBytes) * 100).toInt() else 0
-
-            StorageInfo(
-                totalBytes = totalBytes,
-                freeBytes = freeBytes,
-                usedBytes = usedBytes,
-                usedPercent = percent,
-                totalGbFormatted = String.format("%.1f GB", totalBytes / (1024.0 * 1024 * 1024)),
-                freeGbFormatted = String.format("%.1f GB", freeBytes / (1024.0 * 1024 * 1024)),
-                usedGbFormatted = String.format("%.1f GB", usedBytes / (1024.0 * 1024 * 1024))
-            )
-        } catch (e: Exception) {
-            StorageInfo()
-        }
-    }
-
-    private fun calculateMemory(): MemoryInfoData {
-        return try {
-            val activityManager = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
-            val memInfo = ActivityManager.MemoryInfo()
-            activityManager.getMemoryInfo(memInfo)
-
-            val total = memInfo.totalMem
-            val avail = memInfo.availMem
-            val used = total - avail
-            val percent = if (total > 0) ((used.toDouble() / total) * 100).toInt() else 0
-
-            MemoryInfoData(
-                totalRamBytes = total,
-                availableRamBytes = avail,
-                usedRamBytes = used,
-                usedPercent = percent,
-                isLowMemory = memInfo.lowMemory
-            )
-        } catch (e: Exception) {
-            MemoryInfoData()
-        }
+    fun stop() {
+        batteryMonitor.stopMonitoring()
+        scope.cancel()
     }
 
     fun checkUsageStatsPermission(): Boolean {

@@ -21,9 +21,9 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CleaningServices
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.FolderOpen
-import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.InsertDriveFile
 import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material.icons.filled.Warning
@@ -37,13 +37,13 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -55,13 +55,18 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.example.storage.SharedFileItem
 import com.example.ui.MainViewModel
+import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun StorageScreen(viewModel: MainViewModel) {
     val context = androidx.compose.ui.platform.LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     val dashboardState by viewModel.dashboardState.collectAsState()
     val storage = dashboardState.storage
     val sharedFiles by viewModel.sharedFiles.collectAsState()
@@ -69,6 +74,19 @@ fun StorageScreen(viewModel: MainViewModel) {
 
     var fileToDelete by remember { mutableStateOf<SharedFileItem?>(null) }
     var showClearCacheConfirm by remember { mutableStateOf(false) }
+
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                viewModel.refreshDashboard()
+                viewModel.refreshAppCache()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
 
     // SAF Document Picker launcher
     val filePickerLauncher = rememberLauncherForActivityResult(
@@ -169,9 +187,9 @@ fun StorageScreen(viewModel: MainViewModel) {
             // App Temporary Files & Honest Cache Policy Card
             item {
                 val cacheFormatted = if (cacheSize > 1024 * 1024) {
-                    String.format("%.2f MB", cacheSize / (1024.0 * 1024))
+                    String.format(Locale.US, "%.2f MB", cacheSize / (1024.0 * 1024))
                 } else {
-                    String.format("%.1f KB", cacheSize / 1024.0)
+                    String.format(Locale.US, "%.1f KB", cacheSize / 1024.0)
                 }
 
                 Card(
@@ -285,7 +303,7 @@ fun StorageScreen(viewModel: MainViewModel) {
     // File Deletion Confirmation Dialog
     if (fileToDelete != null) {
         val file = fileToDelete!!
-        val sizeFormatted = String.format("%.2f MB", file.sizeBytes / (1024.0 * 1024))
+        val sizeFormatted = String.format(Locale.US, "%.2f MB", file.sizeBytes / (1024.0 * 1024))
         AlertDialog(
             onDismissRequest = { fileToDelete = null },
             icon = {
@@ -361,7 +379,7 @@ fun SharedFileRow(
     onDeleteRequest: () -> Unit,
     onRemoveFromList: () -> Unit
 ) {
-    val sizeMb = String.format("%.2f MB", item.sizeBytes / (1024.0 * 1024))
+    val sizeMb = String.format(Locale.US, "%.2f MB", item.sizeBytes / (1024.0 * 1024))
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(10.dp),
@@ -402,6 +420,13 @@ fun SharedFileRow(
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+            }
+
+            IconButton(
+                onClick = onRemoveFromList,
+                modifier = Modifier.testTag("remove_file_from_list_${item.name}")
+            ) {
+                Icon(Icons.Default.Close, contentDescription = "Remove from list", tint = MaterialTheme.colorScheme.onSurfaceVariant)
             }
 
             IconButton(

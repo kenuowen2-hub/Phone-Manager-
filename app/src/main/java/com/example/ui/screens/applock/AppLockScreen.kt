@@ -24,21 +24,22 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccessTime
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Fingerprint
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Lock
-import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.Sort
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -49,12 +50,14 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -71,30 +74,52 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.core.graphics.drawable.toBitmap
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.example.data.local.LockSchedule
 import com.example.device.AppItem
 import com.example.device.AppSortOption
+import com.example.security.BiometricHelper
+import com.example.security.BiometricStatus
 import com.example.ui.MainViewModel
+import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AppLockScreen(viewModel: MainViewModel) {
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     val installedApps by viewModel.installedApps.collectAsState()
     val isLoading by viewModel.isLoadingApps.collectAsState()
     val securitySettings by viewModel.securitySettings.collectAsState()
+    val dashboardState by viewModel.dashboardState.collectAsState()
+    val biometricStatus by viewModel.biometricStatus.collectAsState()
     val searchQuery by viewModel.appSearchQuery.collectAsState()
     val sortOption by viewModel.appSortOption.collectAsState()
 
     var showPinDialog by remember { mutableStateOf(false) }
     var showScheduleDialog by remember { mutableStateOf(false) }
     var showPermissionInfoDialog by remember { mutableStateOf(false) }
+    var showEnableLockPromptDialog by remember { mutableStateOf(false) }
     var showSortMenu by remember { mutableStateOf(false) }
     var selectedFilter by remember { mutableStateOf("all") } // "all", "user", "system", "locked"
 
     // App Lock Gate dialog state
     val isGateOpen by viewModel.isLockGateOpen.collectAsState()
     val targetApp by viewModel.testLockApp.collectAsState()
+
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                viewModel.refreshDashboard()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
 
     // Filter apps
     val filteredApps = remember(installedApps, searchQuery, selectedFilter, sortOption) {
@@ -185,6 +210,8 @@ fun AppLockScreen(viewModel: MainViewModel) {
                             onCheckedChange = { enabled ->
                                 if (enabled && !securitySettings.hasPinConfigured) {
                                     showPinDialog = true
+                                } else if (enabled && !dashboardState.hasUsageStatsPermission) {
+                                    showEnableLockPromptDialog = true
                                 } else {
                                     viewModel.setAppLockMasterEnabled(enabled)
                                 }
@@ -235,13 +262,23 @@ fun AppLockScreen(viewModel: MainViewModel) {
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Icon(Icons.Default.Fingerprint, contentDescription = null, modifier = Modifier.size(18.dp), tint = MaterialTheme.colorScheme.primary)
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text("Biometric Unlock", style = MaterialTheme.typography.bodySmall)
+                            Column(modifier = Modifier.weight(1f)) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(Icons.Default.Fingerprint, contentDescription = null, modifier = Modifier.size(18.dp), tint = MaterialTheme.colorScheme.primary)
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text("Biometric Unlock", style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.SemiBold)
+                                }
+                                if (biometricStatus is BiometricStatus.Unavailable) {
+                                    Text(
+                                        (biometricStatus as BiometricStatus.Unavailable).reason,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
                             }
                             Switch(
-                                checked = securitySettings.isBiometricEnabled,
+                                checked = securitySettings.isBiometricEnabled && biometricStatus is BiometricStatus.Available,
+                                enabled = biometricStatus is BiometricStatus.Available,
                                 onCheckedChange = { viewModel.setBiometricEnabled(it) },
                                 modifier = Modifier.testTag("biometric_switch")
                             )
@@ -354,7 +391,24 @@ fun AppLockScreen(viewModel: MainViewModel) {
             }
 
             // App List
-            if (filteredApps.isEmpty() && !isLoading) {
+            if (isLoading && installedApps.isEmpty()) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(32.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        CircularProgressIndicator()
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Text(
+                            "Loading installed apps...",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            } else if (filteredApps.isEmpty()) {
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
@@ -374,6 +428,19 @@ fun AppLockScreen(viewModel: MainViewModel) {
                         .padding(horizontal = 16.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
+                    item(key = "enforcement_status_banner") {
+                        LockEnforcementStatusCard(
+                            hasUsageStatsPermission = dashboardState.hasUsageStatsPermission,
+                            biometricStatus = biometricStatus,
+                            onOpenUsageSettings = {
+                                val intent = Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS).apply {
+                                    flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                                }
+                                context.startActivity(intent)
+                            }
+                        )
+                    }
+
                     items(filteredApps, key = { it.packageName }) { app ->
                         AppRowItem(
                             app = app,
@@ -400,11 +467,65 @@ fun AppLockScreen(viewModel: MainViewModel) {
     if (showPinDialog) {
         SetPinDialog(
             hasExistingPin = securitySettings.hasPinConfigured,
+            onVerifyExistingPin = { currentPin -> viewModel.verifyPin(currentPin) },
             onDismiss = { showPinDialog = false },
             onConfirmPin = { pin ->
                 val success = viewModel.setPin(pin)
                 if (success) {
                     showPinDialog = false
+                }
+            }
+        )
+    }
+
+    // Pre-Enable Permission & Limitation Disclosure Dialog
+    if (showEnableLockPromptDialog) {
+        AlertDialog(
+            onDismissRequest = { showEnableLockPromptDialog = false },
+            icon = {
+                Icon(Icons.Default.Security, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+            },
+            title = { Text("Enable App Lock & Permissions") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        "Before turning on App Lock, review how Android handles app protection:",
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        "• Usage Access Permission: Needed only to inspect recent foreground app activity.\n\n" +
+                                "• Android Platform Limitation: Without invasive Accessibility or System Overlay privileges, third-party apps cannot intercept taps from the Android home launcher.\n\n" +
+                                "• Built-in Fallback (Secure App Launcher): Even without Usage Access, tapping the Launch (▶) icon next to any protected app here enforces your PIN or Biometric gate before opening it.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        viewModel.setAppLockMasterEnabled(true)
+                        showEnableLockPromptDialog = false
+                        val intent = Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS).apply {
+                            flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                        }
+                        context.startActivity(intent)
+                    },
+                    modifier = Modifier.testTag("grant_usage_and_enable_button")
+                ) {
+                    Text("Grant Usage Access")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = {
+                        viewModel.setAppLockMasterEnabled(true)
+                        showEnableLockPromptDialog = false
+                    },
+                    modifier = Modifier.testTag("enable_secure_launcher_only_button")
+                ) {
+                    Text("Use Secure Launcher")
                 }
             }
         )
@@ -475,11 +596,88 @@ fun AppLockScreen(viewModel: MainViewModel) {
         LockGateDialog(
             app = targetApp!!,
             securitySettings = securitySettings,
+            biometricStatus = biometricStatus,
             onVerifyPin = { pin -> viewModel.verifyPin(pin) },
             onBiometricUnlock = { viewModel.recordBiometricSuccess() },
             onUnlocked = { viewModel.onLockGateUnlocked() },
             onDismiss = { viewModel.dismissLockGate() }
         )
+    }
+}
+
+@Composable
+fun LockEnforcementStatusCard(
+    hasUsageStatsPermission: Boolean,
+    biometricStatus: BiometricStatus,
+    onOpenUsageSettings: () -> Unit
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("lock_enforcement_status_card"),
+        shape = RoundedCornerShape(14.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = if (hasUsageStatsPermission) {
+                MaterialTheme.colorScheme.surfaceVariant
+            } else {
+                MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.55f)
+            }
+        )
+    ) {
+        Column(modifier = Modifier.padding(14.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                    Icon(
+                        imageVector = if (hasUsageStatsPermission) Icons.Default.CheckCircle else Icons.Default.Warning,
+                        contentDescription = null,
+                        tint = if (hasUsageStatsPermission) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.tertiary,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = if (hasUsageStatsPermission) "Secure App Launcher Active" else "Usage Access Not Granted",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = if (biometricStatus is BiometricStatus.Available) {
+                        MaterialTheme.colorScheme.primaryContainer
+                    } else {
+                        MaterialTheme.colorScheme.surface
+                    }
+                ) {
+                    Text(
+                        text = if (biometricStatus is BiometricStatus.Available) "Biometrics Ready" else "PIN Only",
+                        style = MaterialTheme.typography.labelSmall,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(6.dp))
+            Text(
+                text = "Standard Android apps cannot block launches directly from the system home launcher without Accessibility or Overlay services. Launch protected apps from this list (tap ▶) to require PIN or Biometric verification.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
+            if (!hasUsageStatsPermission) {
+                Spacer(modifier = Modifier.height(8.dp))
+                OutlinedButton(
+                    onClick = onOpenUsageSettings,
+                    modifier = Modifier.testTag("open_usage_settings_inline_button")
+                ) {
+                    Text("Grant Usage Access in Settings")
+                }
+            }
+        }
     }
 }
 
@@ -545,7 +743,7 @@ fun AppRowItem(
 
             Column(modifier = Modifier.weight(1f)) {
                 Text(app.appName, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold)
-                val sizeMb = if (app.apkSizeBytes > 0) String.format("%.1f MB", app.apkSizeBytes / (1024.0 * 1024)) else "System"
+                val sizeMb = if (app.apkSizeBytes > 0) String.format(Locale.US, "%.1f MB", app.apkSizeBytes / (1024.0 * 1024)) else "System"
                 Text(
                     "${app.packageName} • $sizeMb",
                     style = MaterialTheme.typography.labelSmall,
@@ -605,9 +803,11 @@ fun AppRowItem(
 @Composable
 fun SetPinDialog(
     hasExistingPin: Boolean,
+    onVerifyExistingPin: ((String) -> Boolean)? = null,
     onDismiss: () -> Unit,
     onConfirmPin: (String) -> Unit
 ) {
+    var currentPin by remember { mutableStateOf("") }
     var pin by remember { mutableStateOf("") }
     var confirmPin by remember { mutableStateOf("") }
     var errorMessage by remember { mutableStateOf("") }
@@ -625,10 +825,24 @@ fun SetPinDialog(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
 
+                if (hasExistingPin && onVerifyExistingPin != null) {
+                    OutlinedTextField(
+                        value = currentPin,
+                        onValueChange = { if (it.length <= 6 && it.all { c -> c.isDigit() }) currentPin = it },
+                        label = { Text("Current Security PIN") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+                        visualTransformation = PasswordVisualTransformation(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("current_pin_input_field"),
+                        singleLine = true
+                    )
+                }
+
                 OutlinedTextField(
                     value = pin,
                     onValueChange = { if (it.length <= 6 && it.all { c -> c.isDigit() }) pin = it },
-                    label = { Text("Security PIN (4-6 digits)") },
+                    label = { Text(if (hasExistingPin) "New Security PIN (4-6 digits)" else "Security PIN (4-6 digits)") },
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
                     visualTransformation = PasswordVisualTransformation(),
                     modifier = Modifier
@@ -661,7 +875,9 @@ fun SetPinDialog(
         confirmButton = {
             Button(
                 onClick = {
-                    if (pin.length < 4) {
+                    if (hasExistingPin && onVerifyExistingPin != null && !onVerifyExistingPin(currentPin)) {
+                        errorMessage = "Current PIN is incorrect."
+                    } else if (pin.length < 4) {
                         errorMessage = "PIN must be at least 4 digits."
                     } else if (pin != confirmPin) {
                         errorMessage = "PINs do not match."
@@ -759,11 +975,13 @@ fun ScheduleOptionRow(
 fun LockGateDialog(
     app: AppItem,
     securitySettings: com.example.data.local.SecuritySettingsState,
+    biometricStatus: BiometricStatus,
     onVerifyPin: (String) -> Boolean,
     onBiometricUnlock: () -> Unit,
     onUnlocked: () -> Unit,
     onDismiss: () -> Unit
 ) {
+    val context = LocalContext.current
     var pinInput by remember { mutableStateOf("") }
     var errorText by remember { mutableStateOf("") }
 
@@ -783,7 +1001,7 @@ fun LockGateDialog(
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text(
-                    "This app is protected by Smart Phone Manager. Enter your security PIN to unlock and launch.",
+                    "This app is protected by Smart Phone Manager. Verify your security PIN or device biometrics to unlock and launch.",
                     style = MaterialTheme.typography.bodySmall
                 )
 
@@ -813,18 +1031,39 @@ fun LockGateDialog(
                     }
 
                     if (securitySettings.isBiometricEnabled) {
-                        OutlinedButton(
-                            onClick = {
-                                onBiometricUnlock()
-                                onUnlocked()
-                            },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .testTag("gate_biometric_button")
-                        ) {
-                            Icon(Icons.Default.Fingerprint, contentDescription = null)
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("Simulate Biometric Unlock")
+                        when (biometricStatus) {
+                            is BiometricStatus.Available -> {
+                                OutlinedButton(
+                                    onClick = {
+                                        BiometricHelper.authenticate(
+                                            context = context,
+                                            title = "Unlock ${app.appName}",
+                                            subtitle = "Verify your identity to launch this protected app",
+                                            onSuccess = {
+                                                onBiometricUnlock()
+                                                onUnlocked()
+                                            },
+                                            onError = { err ->
+                                                errorText = err
+                                            }
+                                        )
+                                    },
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .testTag("gate_biometric_button")
+                                ) {
+                                    Icon(Icons.Default.Fingerprint, contentDescription = null)
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text("Unlock with Biometrics")
+                                }
+                            }
+                            is BiometricStatus.Unavailable -> {
+                                Text(
+                                    text = "Biometric prompt unavailable: ${biometricStatus.reason}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
                         }
                     }
                 }
